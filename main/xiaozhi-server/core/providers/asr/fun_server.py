@@ -3,6 +3,7 @@ from core.providers.asr.base import ASRProviderBase
 from core.providers.asr.dto.dto import InterfaceType
 import ssl
 import json
+import time
 import websockets
 from config.logger import setup_logging
 import asyncio
@@ -41,22 +42,35 @@ class ASRProvider(ASRProviderBase):
             self.ssl_context.check_hostname = False
             self.ssl_context.verify_mode = ssl.CERT_NONE
 
-    async def _receive_responses(self, ws) -> None:
+    async def _receive_responses(self, ws, asr_start_time: float = None) -> None:
         """
         Asynchronous generator to receive messages from the WebSocket.
         Yields each message as it is received.
         """
         text = ""
+        if asr_start_time is None:
+            asr_start_time = time.time()
+        asr_first_response_received = False
+        
         while True:
             try:
                 response = await asyncio.wait_for(ws.recv(), timeout=5)
                 response_data = json.loads(response)
                 logger.bind(tag=TAG).debug(f"Received response: {response_data}")
+                
+                # 记录ASR首次响应时间
+                response_text = response_data.get("text", "")
+                if not asr_first_response_received and response_text:
+                    asr_first_response_time = time.time()
+                    asr_first_response_received = True
+                    first_response_latency = asr_first_response_time - asr_start_time
+                    logger.bind(tag=TAG).info(f"ASR首次响应耗时: {first_response_latency:.3f}s")
+                
                 if response_data.get("is_final", True):
-                    text += response_data.get("text", "")
+                    text += response_text
                     break
                 else:
-                    text += response_data.get("text", "")
+                    text += response_text
             except asyncio.TimeoutError:
                 logger.bind(tag=TAG).error(
                     "Timeout while waiting for response from WebSocket."
@@ -108,6 +122,9 @@ class ASRProvider(ASRProviderBase):
         :param session_id: Unique session identifier.
         :return: Tuple containing recognized text and optional timestamp.
         """
+        # 记录ASR开始时间
+        asr_start_time = time.time()
+        
         file_path = None
         if audio_format == "pcm":
             pcm_data = opus_data
@@ -133,7 +150,7 @@ class ASRProvider(ASRProviderBase):
                 send_task = asyncio.create_task(
                     self._send_data(ws, combined_pcm_data, session_id)
                 )
-                receive_task = asyncio.create_task(self._receive_responses(ws))
+                receive_task = asyncio.create_task(self._receive_responses(ws, asr_start_time))
 
                 # Gather tasks with error handling
                 done, pending = await asyncio.wait(

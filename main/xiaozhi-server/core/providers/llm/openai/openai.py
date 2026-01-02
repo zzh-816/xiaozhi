@@ -1,5 +1,6 @@
 import httpx
 import openai
+import time
 from openai.types import CompletionUsage
 from config.logger import setup_logging
 from core.utils.util import check_model_key
@@ -77,6 +78,10 @@ class LLMProvider(LLMProviderBase):
                 if value is not None:
                     request_params[key] = value
 
+            # 记录LLM调用开始时间
+            llm_start_time = time.time()
+            llm_first_response_received = False
+            
             responses = self.client.chat.completions.create(**request_params)
 
             is_active = True
@@ -87,6 +92,13 @@ class LLMProvider(LLMProviderBase):
                 except IndexError:
                     content = ""
                 if content:
+                    # 记录LLM首次响应时间
+                    if not llm_first_response_received and content.strip():
+                        llm_first_response_time = time.time()
+                        llm_first_response_received = True
+                        first_response_latency = llm_first_response_time - llm_start_time
+                        logger.bind(tag=TAG).info(f"LLM首次响应耗时: {first_response_latency:.3f}s")
+                    
                     if "<think>" in content:
                         is_active = False
                         content = content.split("<think>")[0]
@@ -121,6 +133,10 @@ class LLMProvider(LLMProviderBase):
                 if value is not None:
                     request_params[key] = value
 
+            # 记录LLM调用开始时间
+            llm_start_time = time.time()
+            llm_first_response_received = False
+            
             stream = self.client.chat.completions.create(**request_params)
 
             for chunk in stream:
@@ -128,6 +144,14 @@ class LLMProvider(LLMProviderBase):
                     delta = chunk.choices[0].delta
                     content = getattr(delta, "content", "")
                     tool_calls = getattr(delta, "tool_calls", None)
+                    
+                    # 记录LLM首次响应时间
+                    if not llm_first_response_received and (content or tool_calls):
+                        llm_first_response_time = time.time()
+                        llm_first_response_received = True
+                        first_response_latency = llm_first_response_time - llm_start_time
+                        logger.bind(tag=TAG).info(f"LLM首次响应耗时: {first_response_latency:.3f}s")
+                    
                     yield content, tool_calls
                 elif isinstance(getattr(chunk, "usage", None), CompletionUsage):
                     usage_info = getattr(chunk, "usage", None)

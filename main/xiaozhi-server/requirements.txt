@@ -40,3 +40,5 @@ psutil==7.0.0
 portalocker==3.2.0
 Jinja2==3.1.6
 vosk==0.3.45
+sentence-transformers>=2.2.0
+faiss-cpu>=1.7.4

@@ -236,17 +236,22 @@ class ConnectionHandler:
         """保存记忆并关闭连接"""
         try:
             if self.memory:
-                # 使用线程池异步保存记忆
+                # 使用线程池异步保存记忆和最终提取
                 def save_memory_task():
                     try:
                         # 创建新事件循环（避免与主循环冲突）
                         loop = asyncio.new_event_loop()
                         asyncio.set_event_loop(loop)
+                        # 先保存当前工作记忆
                         loop.run_until_complete(
                             self.memory.save_memory(self.dialogue.dialogue)
                         )
+                        # 然后进行最终提取（强制提取剩余未处理的消息并重置计数）
+                        loop.run_until_complete(
+                            self.memory.finalize_session(self.dialogue.dialogue)
+                        )
                     except Exception as e:
-                        self.logger.bind(tag=TAG).error(f"保存记忆失败: {e}")
+                        self.logger.bind(tag=TAG).error(f"保存记忆或最终提取失败: {e}")
                     finally:
                         try:
                             loop.close()
@@ -808,10 +813,17 @@ class ConnectionHandler:
             # 使用带记忆的对话
             memory_str = None
             if self.memory is not None:
+                # 获取当前对话历史（用于去重）
+                current_dialogue = [msg for msg in self.dialogue.dialogue if msg.role in ['user', 'assistant']]
                 future = asyncio.run_coroutine_threadsafe(
-                    self.memory.query_memory(query), self.loop
+                    self.memory.query_memory(query, current_dialogue), self.loop
                 )
                 memory_str = future.result()
+                if memory_str:
+                    self.logger.bind(tag=TAG).info(f"记忆已检索并传递给LLM，长度: {len(memory_str)} 字符")
+                    self.logger.bind(tag=TAG).debug(f"记忆内容预览: {memory_str[:300]}")
+                else:
+                    self.logger.bind(tag=TAG).debug("未检索到记忆，memory_str为空")
 
             if self.intent_type == "function_call" and functions is not None:
                 # 使用支持functions的streaming接口
@@ -967,6 +979,21 @@ class ConnectionHandler:
                     self.dialogue.get_llm_dialogue(), indent=4, ensure_ascii=False
                 )
             )
+            
+            # 保存记忆（每次对话完成后）
+            if self.memory:
+                def save_memory_task():
+                    try:
+                        loop = asyncio.new_event_loop()
+                        asyncio.set_event_loop(loop)
+                        loop.run_until_complete(
+                            self.memory.save_memory(self.dialogue.dialogue)
+                        )
+                        loop.close()
+                    except Exception as e:
+                        self.logger.bind(tag=TAG).error(f"保存记忆失败: {e}")
+                
+                threading.Thread(target=save_memory_task, daemon=True).start()
 
         return True
 

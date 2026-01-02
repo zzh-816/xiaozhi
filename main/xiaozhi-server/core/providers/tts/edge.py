@@ -23,6 +23,7 @@ class TTSProvider(TTSProviderBase):
     async def text_to_speak(self, text, output_file):
         try:
             communicate = edge_tts.Communicate(text, voice=self.voice)
+            audio_received = False
             if output_file:
                 # 确保目录存在并创建空文件
                 os.makedirs(os.path.dirname(output_file), exist_ok=True)
@@ -34,12 +35,22 @@ class TTSProvider(TTSProviderBase):
                     async for chunk in communicate.stream():
                         if chunk["type"] == "audio":  # 只处理音频数据块
                             f.write(chunk["data"])
+                            audio_received = True
+                
+                # 验证是否收到音频数据
+                if not audio_received or (os.path.exists(output_file) and os.path.getsize(output_file) == 0):
+                    raise Exception("No audio was received. Please verify that your parameters are correct.")
             else:
                 # 返回音频二进制数据
                 audio_bytes = b""
                 async for chunk in communicate.stream():
                     if chunk["type"] == "audio":
                         audio_bytes += chunk["data"]
+                        audio_received = True
+                
+                # 验证是否收到音频数据
+                if not audio_received or len(audio_bytes) == 0:
+                    raise Exception("No audio was received. Please verify that your parameters are correct.")
                 return audio_bytes
         except Exception as e:
             error_msg = f"Edge TTS请求失败: {e}"

@@ -153,7 +153,7 @@ main/manager-web/node_modules
 .private_config.yaml
 .env.development
 
-# model files
+# model files - exclude all model files to avoid large files
 main/xiaozhi-server/models/SenseVoiceSmall/model.pt
 main/xiaozhi-server/models/sherpa-onnx*
 /main/xiaozhi-server/audio_ref/
@@ -162,6 +162,36 @@ main/xiaozhi-server/models/sherpa-onnx*
 /main/xiaozhi-server/asr-models/iic/SenseVoiceSmall/
 /models/SenseVoiceSmall/model.pt
 my_wakeup_words.mp3
+
+# Additional model file extensions
+*.pt
+*.pth
+*.onnx
+*.safetensors
+*.bin
+*.pkl
+*.h5
+*.ckpt
+*.jit
+*.model
+
+# Model directories - exclude entire directories with large model files
+# Note: This excludes directories but config files in model directories will be handled by extension rules above
+main/xiaozhi-server/models/BAAI/bge-small-zh-v1.5/model.safetensors
+main/xiaozhi-server/models/BAAI/bge-small-zh-v1.5/*.safetensors
+main/xiaozhi-server/models/snakers4_silero-vad/src/silero_vad/data/*.onnx
+main/xiaozhi-server/models/snakers4_silero-vad/src/silero_vad/data/*.jit
+
+# Data files - exclude databases and vector indexes
+*.db
+*.db-journal
+*.faiss
+*.index
+
+# Memory system data files
+main/xiaozhi-server/data/multi_tier_memory/
+telegrambot/wks/*.faiss
+telegrambot/wks/*.pkl
 !main/xiaozhi-server/config/assets/bind_code.wav
 !main/xiaozhi-server/config/assets/wakeup_words.wav
 !main/xiaozhi-server/config/assets/bind_not_found.wav
