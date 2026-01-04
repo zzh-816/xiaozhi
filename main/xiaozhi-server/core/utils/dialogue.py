@@ -46,9 +46,9 @@ class Dialogue:
             dialogue.append({"role": m.role, "content": m.content})
 
     def get_llm_dialogue(self) -> List[Dict[str, str]]:
-        # 直接调用get_llm_dialogue_with_memory，传入None作为memory_str
+        # 直接调用get_llm_dialogue_with_memory，传入None作为参数
         # 这样确保说话人功能在所有调用路径下都生效
-        return self.get_llm_dialogue_with_memory(None, None)
+        return self.get_llm_dialogue_with_memory(None, None, None)
 
     def update_system_message(self, new_content: str):
         """更新或添加系统消息"""
@@ -60,7 +60,7 @@ class Dialogue:
             self.put(Message(role="system", content=new_content))
 
     def get_llm_dialogue_with_memory(
-        self, memory_str: str = None, voiceprint_config: dict = None
+        self, memory_str: str = None, voiceprint_config: dict = None, user_info_str: str = None
     ) -> List[Dict[str, str]]:
         # 构建对话
         dialogue = []
@@ -100,7 +100,26 @@ class Dialogue:
                 # 配置读取失败时忽略错误，不影响其他功能
                 pass
 
-            # 使用正则表达式匹配 <memory> 标签，不管中间有什么内容
+            # 使用正则表达式匹配 <user> 标签，插入用户信息
+            if user_info_str is not None:
+                if user_info_str.strip():
+                    # 如果有用户信息，插入内容
+                    enhanced_system_prompt = re.sub(
+                        r"<user>.*?</user>",
+                        f"<user>\n这是用户信息：\n{user_info_str}\n</user>",
+                        enhanced_system_prompt,
+                        flags=re.DOTALL,
+                    )
+                else:
+                    # 如果没有用户信息，保持原样（只有"这是用户信息："）
+                    enhanced_system_prompt = re.sub(
+                        r"<user>.*?</user>",
+                        f"<user>\n这是用户信息：\n</user>",
+                        enhanced_system_prompt,
+                        flags=re.DOTALL,
+                    )
+            
+            # 使用正则表达式匹配 <memory> 标签，插入记忆信息
             if memory_str is not None:
                 enhanced_system_prompt = re.sub(
                     r"<memory>.*?</memory>",

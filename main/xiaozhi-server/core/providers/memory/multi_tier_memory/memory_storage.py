@@ -1,6 +1,7 @@
 """记忆存储层：负责数据库和向量索引的存储操作"""
 import os
 import json
+import re
 import sqlite3
 from datetime import datetime
 from typing import List, Dict, Optional
@@ -584,12 +585,21 @@ class MemoryStorage:
             self.vector_index.add(embedding_2d)
             add_time = time.time() - add_start
             
+            # timestamp始终使用保存时的日期（current_date），表示这条记忆是什么时候被保存的
+            # text中的日期是事件发生的日期，可能与timestamp不同（例如：用户说"我昨天去爬山了"）
+            # 格式可能是："2026-01-01: 用户去爬山了" 或 "2026-01-01:用户去爬山了"
+            timestamp = current_date  # 始终使用保存时的日期
+            date_match = re.match(r'^(\d{4}-\d{2}-\d{2}):\s*', memory_text)
+            if date_match:
+                extracted_date = date_match.group(1)
+                logger.bind(tag=TAG).debug(f"memory_text中包含事件日期: {extracted_date}，但timestamp使用保存时的日期: {current_date}")
+            
             # 保存元数据
             self.vector_metadata.append({
                 "text": memory_text,
                 "memory_type": memory_type,
                 "user_id": user_id,
-                "timestamp": current_date
+                "timestamp": timestamp
             })
             
             total_time = time.time() - start_time

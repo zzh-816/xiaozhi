@@ -811,6 +811,7 @@ class ConnectionHandler:
 
         try:
             # 使用带记忆的对话
+            user_info_str = None
             memory_str = None
             if self.memory is not None:
                 # 获取当前对话历史（用于去重）
@@ -818,19 +819,30 @@ class ConnectionHandler:
                 future = asyncio.run_coroutine_threadsafe(
                     self.memory.query_memory(query, current_dialogue), self.loop
                 )
-                memory_str = future.result()
+                memory_result = future.result()
+                # 处理返回的字典格式
+                if isinstance(memory_result, dict):
+                    user_info_str = memory_result.get("user_info", "")
+                    memory_str = memory_result.get("memory_info", "")
+                else:
+                    # 兼容旧格式（字符串）
+                    memory_str = memory_result if memory_result else None
+                
+                if user_info_str:
+                    self.logger.bind(tag=TAG).info(f"用户信息已检索并传递给LLM，长度: {len(user_info_str)} 字符")
+                    self.logger.bind(tag=TAG).debug(f"用户信息内容预览: {user_info_str[:300]}")
                 if memory_str:
                     self.logger.bind(tag=TAG).info(f"记忆已检索并传递给LLM，长度: {len(memory_str)} 字符")
                     self.logger.bind(tag=TAG).debug(f"记忆内容预览: {memory_str[:300]}")
-                else:
-                    self.logger.bind(tag=TAG).debug("未检索到记忆，memory_str为空")
+                if not user_info_str and not memory_str:
+                    self.logger.bind(tag=TAG).debug("未检索到任何记忆")
 
             if self.intent_type == "function_call" and functions is not None:
                 # 使用支持functions的streaming接口
                 llm_responses = self.llm.response_with_functions(
                     self.session_id,
                     self.dialogue.get_llm_dialogue_with_memory(
-                        memory_str, self.config.get("voiceprint", {})
+                        memory_str, self.config.get("voiceprint", {}), user_info_str
                     ),
                     functions=functions,
                 )
@@ -838,7 +850,7 @@ class ConnectionHandler:
                 llm_responses = self.llm.response(
                     self.session_id,
                     self.dialogue.get_llm_dialogue_with_memory(
-                        memory_str, self.config.get("voiceprint", {})
+                        memory_str, self.config.get("voiceprint", {}), user_info_str
                     ),
                 )
         except Exception as e:

@@ -104,6 +104,9 @@ class MemoryProvider(MemoryProviderBase):
         # 加载工作记忆
         self._load_working_memory()
         
+        # 预加载profile到缓存（系统启动时立即加载）
+        self._preload_profile()
+        
         logger.bind(tag=TAG).info(f"记忆系统已为用户 {role_id} 初始化（新会话，计数从0开始）")
     
     def _load_working_memory(self):
@@ -117,6 +120,31 @@ class MemoryProvider(MemoryProviderBase):
             self.working_memory.append(msg)
         
         logger.bind(tag=TAG).debug(f"加载了 {len(self.working_memory)} 条工作记忆到内存")
+    
+    def _preload_profile(self):
+        """系统启动时预加载profile到缓存"""
+        if not self.role_id:
+            logger.bind(tag=TAG).debug("role_id为空，跳过profile预加载")
+            return
+        
+        if self.retriever is None:
+            logger.bind(tag=TAG).debug("retriever未初始化，跳过profile预加载")
+            return
+        
+        try:
+            logger.bind(tag=TAG).info(f"系统启动时预加载profile，role_id: {self.role_id}")
+            profile_start = time.time()
+            profile = self.retriever.retrieve_long_term_memory(self.role_id)
+            profile_time = time.time() - profile_start
+            
+            if profile:
+                self.profile_cache = profile
+                self.profile_cache_time = time.time()
+                logger.bind(tag=TAG).info(f"Profile预加载成功: {json.dumps(profile, ensure_ascii=False)}, 耗时: {profile_time:.3f}s")
+            else:
+                logger.bind(tag=TAG).info(f"Profile预加载完成，但未找到用户画像数据，耗时: {profile_time:.3f}s")
+        except Exception as e:
+            logger.bind(tag=TAG).warning(f"Profile预加载失败: {e}，将在首次查询时加载")
     
     async def save_memory(self, msgs: List):
         """保存记忆（固定频率触发）"""
@@ -222,20 +250,21 @@ class MemoryProvider(MemoryProviderBase):
             import traceback
             logger.bind(tag=TAG).error(f"会话关闭：最终提取失败: {e}, 错误详情: {traceback.format_exc()}")
     
-    async def query_memory(self, query: str, dialogue_history: List = None) -> str:
-        """检索记忆"""
+    async def query_memory(self, query: str, dialogue_history: List = None) -> Dict[str, str]:
+        """检索记忆，返回用户信息和记忆信息（分离）"""
         if not self.role_id:
             logger.bind(tag=TAG).debug("role_id为空，跳过记忆检索")
-            return ""
+            return {"user_info": "", "memory_info": ""}
         
         # 检查是否已初始化
         if self.retriever is None:
             logger.bind(tag=TAG).warning("记忆系统尚未初始化（retriever为None），跳过记忆检索")
-            return ""
+            return {"user_info": "", "memory_info": ""}
         
         total_start_time = time.time()
         logger.bind(tag=TAG).info(f"开始检索记忆，查询: {query[:50]}")
         memory_parts = []
+        user_info_parts = []
         
         # 1. 工作记忆（从内存获取，但排除当前对话历史中已有的消息）
         working_mem_start = time.time()
@@ -275,49 +304,81 @@ class MemoryProvider(MemoryProviderBase):
             for commitment in short_term["commitments"]:
                 logger.bind(tag=TAG).info(f"  - 承诺: {commitment[:50]}")
         
-        # 3. 长期记忆（profile，使用缓存）
+        # 3. 长期记忆（profile，使用缓存）- 单独放在user_info中
         profile_start = time.time()
         profile = self._get_profile()
         profile_time = time.time() - profile_start
         logger.bind(tag=TAG).info(f"用户画像检索耗时: {profile_time:.3f}s")
         if profile:
-            # 格式化profile，使其更清晰易懂
-            profile_lines = []
-            profile_lines.append("用户画像信息：")
+            # 格式化profile，使其更清晰易懂，便于LLM识别
+            profile_parts = []
             
-            # 提取基本信息
-            if "基本信息" in profile:
-                basic_info = profile["基本信息"]
-                for key, value in basic_info.items():
-                    if value:
-                        profile_lines.append(f"- {key}: {value}")
+            # 提取基本信息，使用更自然的语言格式
+            basic_info = profile.get("基本信息", {})
+            name = basic_info.get("姓名", "").strip() if basic_info.get("姓名") else ""
+            age = basic_info.get("年龄", "").strip() if basic_info.get("年龄") else ""
+            job = basic_info.get("职业", "").strip() if basic_info.get("职业") else ""
+            location = basic_info.get("位置", "").strip() if basic_info.get("位置") else ""
+            preference = basic_info.get("喜好", "").strip() if basic_info.get("喜好") else ""
             
-            # 提取其他信息
+            # 构建基本信息字符串，使用最直接的方式，强调这是用户的信息
+            if name:
+                profile_parts.append(f"**用户的名字是：{name}**（当用户问'我叫什么名字'时，回答这个名字）")
+            if age:
+                profile_parts.append(f"用户的年龄是：{age}岁（当用户问'我的年龄'或'我多大了'时，回答这个年龄）")
+            if job:
+                profile_parts.append(f"用户的职业是：{job}（当用户问'我的职业'或'我是做什么的'时，回答这个职业）")
+            if location:
+                profile_parts.append(f"用户的位置是：{location}")
+            if preference:
+                profile_parts.append(f"用户的喜好是：{preference}")
+            
+            # 提取其他信息（价值观、边界、沟通偏好等）
+            other_info_parts = []
+            if "价值观和边界" in profile:
+                values = profile["价值观和边界"]
+                if isinstance(values, list) and values:
+                    other_info_parts.append(f"价值观和边界：{', '.join(values)}")
+            
+            if "沟通风格偏好" in profile:
+                comm_prefs = profile["沟通风格偏好"]
+                if isinstance(comm_prefs, list) and comm_prefs:
+                    other_info_parts.append(f"沟通偏好：{', '.join(comm_prefs)}")
+            
+            # 处理其他未分类的信息
             for key, value in profile.items():
-                if key != "基本信息" and value:
-                    if isinstance(value, list):
-                        for item in value:
-                            profile_lines.append(f"- {key}: {item}")
-                    elif isinstance(value, dict):
+                if key not in ["基本信息", "价值观和边界", "沟通风格偏好"]:
+                    if isinstance(value, list) and value:
+                        other_info_parts.append(f"{key}：{', '.join(str(v) for v in value)}")
+                    elif isinstance(value, dict) and value:
                         for sub_key, sub_value in value.items():
                             if sub_value:
-                                profile_lines.append(f"- {key}.{sub_key}: {sub_value}")
-                    else:
-                        profile_lines.append(f"- {key}: {value}")
+                                other_info_parts.append(f"{key}.{sub_key}：{sub_value}")
+                    elif value:
+                        other_info_parts.append(f"{key}：{value}")
             
-            profile_str = "\n".join(profile_lines)
-            memory_parts.append(f"[用户画像]\n{profile_str}")
+            if other_info_parts:
+                profile_parts.extend(other_info_parts)
+            
+            if profile_parts:
+                profile_str = "\n".join(profile_parts)
+                user_info_parts.append(profile_str)
             logger.bind(tag=TAG).info("检索到用户画像")
         
-        result = "\n\n".join(memory_parts) if memory_parts else ""
+        user_info = "\n".join(user_info_parts) if user_info_parts else ""
+        memory_info = "\n\n".join(memory_parts) if memory_parts else ""
+        
         total_time = time.time() - total_start_time
-        if result:
-            logger.bind(tag=TAG).info(f"记忆检索完成，共检索到 {len(memory_parts)} 类记忆，总长度: {len(result)} 字符，总耗时: {total_time:.3f}s")
-            logger.bind(tag=TAG).debug(f"检索到的记忆内容: {result[:500]}")
+        if user_info or memory_info:
+            logger.bind(tag=TAG).info(f"记忆检索完成，用户信息长度: {len(user_info)} 字符，记忆信息长度: {len(memory_info)} 字符，总耗时: {total_time:.3f}s")
+            if user_info:
+                logger.bind(tag=TAG).debug(f"用户信息内容: {user_info[:300]}")
+            if memory_info:
+                logger.bind(tag=TAG).debug(f"记忆信息内容: {memory_info[:300]}")
         else:
             logger.bind(tag=TAG).info(f"未检索到任何记忆，总耗时: {total_time:.3f}s")
         
-        return result
+        return {"user_info": user_info, "memory_info": memory_info}
     
     def _get_profile(self) -> Optional[Dict]:
         """获取用户画像（带缓存）"""
