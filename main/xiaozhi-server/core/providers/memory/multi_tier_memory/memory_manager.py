@@ -61,8 +61,8 @@ FACTS_EXTRACTION_PROMPT = """提取已发生的事件（过去完成的事件，
 5. 必须返回JSON：{{"memories": ["日期: 事件"]}} 或 {{"memories": []}}
 
 【日期计算规则】（当前日期：{{current_date}}（{{current_weekday}}））
-- '今天' = {{current_date}}
-- '昨天' = {{current_date}}的前一天
+  - '今天' = {{current_date}}
+  - '昨天' = {{current_date}}的前一天
 - '前天' = {{current_date}}的前两天
 - '大前天' = {{current_date}}的前三天
 - '这周X' = 本周的星期X（如果今天已经是星期X，就是今天；否则是本周内该星期X的日期）
@@ -122,7 +122,7 @@ COMMITMENTS_EXTRACTION_PROMPT = """提取未来的计划/承诺（包含"要"、
 4. 必须返回JSON：{{"memories": ["日期: 计划"]}} 或 {{"memories": []}}
 
 【日期计算规则】（当前日期：{{current_date}}（{{current_weekday}}））
-- '明天' = {{current_date}}的后一天
+  - '明天' = {{current_date}}的后一天
 - '这周X' = 本周的星期X（如果今天已经是星期X，就是今天；否则是本周内该星期X的日期）
 - '下周X' = 从今天开始，找到下一个星期X的日期（不是下下周，就是下一个该星期几）
 - '下周' = 下周一（如果只说"下周"没有具体星期几，默认下周一）

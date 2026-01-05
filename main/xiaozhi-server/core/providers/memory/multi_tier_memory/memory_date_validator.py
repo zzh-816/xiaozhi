@@ -7,7 +7,7 @@ from ..base import logger
 
 TAG = __name__
 
-# 相对时间词模式（过去到上周，未来到下下周）
+# 相对时间词模式（过去到上周，未来到下周）
 RELATIVE_TIME_PATTERNS = [
     # 基础相对时间
     r'今天', r'昨天', r'明天', r'后天', r'大后天',
@@ -16,7 +16,6 @@ RELATIVE_TIME_PATTERNS = [
     r'这周[一二三四五六日天]',
     r'下周[一二三四五六日天]',
     r'下周$',  # 单独的"下周"（没有具体星期几）
-    r'下下[一二三四五六日天]',
     r'本周[一二三四五六日天]',
     r'本[一二三四五六日天]',
     r'上周[一二三四五六日天]',
@@ -68,7 +67,6 @@ def detect_relative_time_word(content: str) -> Optional[str]:
     """
     # 按优先级检测（更具体的模式先检测）
     priority_patterns = [
-        (r'下下[一二三四五六日天]', '下下周'),
         (r'下周[一二三四五六日天]', '下周'),  # 先检测"下周X"（有具体星期）
         (r'下周(?![\u4e00-\u9fa5])', '下周'),  # 再检测单独的"下周"（后面不是汉字，即没有具体星期，默认下周一）
         (r'这周[一二三四五六日天]', '这周'),
@@ -96,14 +94,16 @@ def detect_relative_time_word(content: str) -> Optional[str]:
         match = re.search(pattern, content)
         if match:
             matched_text = match.group(0)
+            match_end = match.end()
+            
             # 特殊处理：如果匹配到"下周"但后面跟着星期几的汉字，跳过（应该匹配"下周X"）
             if matched_text == '下周':
                 # 检查"下周"后面是否跟着星期几的汉字
-                match_pos = match.end()
-                if match_pos < len(content):
-                    next_char = content[match_pos]
+                if match_end < len(content):
+                    next_char = content[match_end]
                     if next_char in '一二三四五六日天':
                         continue  # 跳过，应该匹配"下周X"
+            
             return matched_text  # 返回匹配到的完整文本
     
     return None
@@ -208,23 +208,25 @@ def calculate_correct_date(relative_time: str, current_date: str, current_weekda
             # 提取星期几
             weekday_char = relative_time.replace('下周', '')
             target_weekday = _char_to_weekday_num(weekday_char)
-            # 下一个星期X（不是下下周）
-            days_ahead = (target_weekday - current_weekday_num) % 7
-            if days_ahead == 0:  # 如果今天就是目标星期，下个星期X是7天后
+            # "下周五"的定义：下周的目标星期，不是本周的目标星期
+            # 计算方法：
+            # 1. 先计算到下一个目标星期需要多少天
+            days_to_next = (target_weekday - current_weekday_num) % 7
+            if days_to_next == 0:
+                # 如果今天就是目标星期，下个星期X是7天后
                 return current_dt + timedelta(days=7)
+            elif target_weekday > current_weekday_num:
+                # 如果目标星期在本周还没到，那么"下周五"需要跳过本周的目标星期，到下周的目标星期
+                # 例如：今天是周一(0)，下周五(4)：
+                #   - 本周五是4天后（1月9号）
+                #   - 下周五是7+4=11天后（1月16号）
+                return current_dt + timedelta(days=7 + days_to_next)
             else:
-                return current_dt + timedelta(days=days_ahead)
-        
-        elif '下下' in relative_time:
-            # 提取星期几
-            weekday_char = relative_time.replace('下下', '')
-            target_weekday = _char_to_weekday_num(weekday_char)
-            # 下下周的星期X
-            days_ahead = (target_weekday - current_weekday_num) % 7
-            if days_ahead == 0:  # 如果今天就是目标星期，下下周的星期X是14天后
-                return current_dt + timedelta(days=14)
-            else:
-                return current_dt + timedelta(days=7 + days_ahead)
+                # 如果目标星期在本周已经过了，那么下一个目标星期就是下周五
+                # 例如：今天是周六(5)，下周五(4)：
+                #   - days_to_next = (4-5) % 7 = 6（到下一个周五，也就是下周五）
+                #   - 所以直接返回days_to_next天后（6天后）
+                return current_dt + timedelta(days=days_to_next)
         
         elif '上周' in relative_time:
             # 提取星期几

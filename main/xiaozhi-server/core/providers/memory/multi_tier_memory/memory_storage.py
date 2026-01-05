@@ -38,6 +38,18 @@ class MemoryStorage:
                  embedding_dim: int = 384, embedder_config: Optional[Dict] = None):
         self.db_path = db_path
         self.vector_index_path = vector_index_path
+        # 兼容旧版本：如果传入的是单个路径，拆分为两个路径
+        base_dir = os.path.dirname(vector_metadata_path)
+        # 从路径中提取role_id部分（例如：vector_metadata_CA_F9_55_4C_4F_3D.json -> CA_F9_55_4C_4F_3D）
+        base_name = os.path.basename(vector_metadata_path)
+        if 'vector_metadata_' in base_name:
+            role_id_part = base_name.replace('vector_metadata_', '').replace('.json', '')
+        else:
+            # 如果格式不对，尝试其他方式
+            role_id_part = base_name.replace('.json', '')
+        self.facts_metadata_path = os.path.join(base_dir, f"facts_metadata_{role_id_part}.json")
+        self.commitments_metadata_path = os.path.join(base_dir, f"commitments_metadata_{role_id_part}.json")
+        # 保留旧路径用于兼容（如果存在旧文件，需要迁移）
         self.vector_metadata_path = vector_metadata_path
         self.embedding_dim = embedding_dim
         
@@ -525,17 +537,62 @@ class MemoryStorage:
                 self.vector_index = faiss.IndexFlatL2(self.embedding_dim)
                 logger.bind(tag=TAG).debug(f"创建新的向量索引，维度: {self.embedding_dim}")
             
-            # 加载元数据
-            if os.path.exists(self.vector_metadata_path):
-                with open(self.vector_metadata_path, 'r', encoding='utf-8') as f:
-                    loaded_metadata = json.load(f)
-                    # 如果索引被重建，清空元数据
-                    if self.vector_index.ntotal == 0:
-                        self.vector_metadata = []
-                        logger.bind(tag=TAG).debug("索引为空，清空元数据")
-                    else:
-                        self.vector_metadata = loaded_metadata
-                        logger.bind(tag=TAG).debug(f"向量元数据已加载: {len(self.vector_metadata)} 条")
+            # 加载元数据（从两个文件分别加载）
+            self.vector_metadata = []
+            
+            # 如果索引被重建，清空元数据
+            if self.vector_index.ntotal == 0:
+                logger.bind(tag=TAG).debug("索引为空，清空元数据")
+            else:
+                # 尝试从旧文件迁移（兼容性处理）
+                if os.path.exists(self.vector_metadata_path):
+                    logger.bind(tag=TAG).info(f"发现旧格式的metadata文件，开始迁移: {self.vector_metadata_path}")
+                    try:
+                        with open(self.vector_metadata_path, 'r', encoding='utf-8') as f:
+                            old_metadata = json.load(f)
+                        # 按类型分开保存
+                        facts_metadata = [m for m in old_metadata if m.get("memory_type") == "facts"]
+                        commitments_metadata = [m for m in old_metadata if m.get("memory_type") == "commitments"]
+                        # 保存到新文件
+                        if facts_metadata:
+                            os.makedirs(os.path.dirname(self.facts_metadata_path), exist_ok=True)
+                            with open(self.facts_metadata_path, 'w', encoding='utf-8') as f:
+                                json.dump(facts_metadata, f, ensure_ascii=False, indent=2)
+                        if commitments_metadata:
+                            os.makedirs(os.path.dirname(self.commitments_metadata_path), exist_ok=True)
+                            with open(self.commitments_metadata_path, 'w', encoding='utf-8') as f:
+                                json.dump(commitments_metadata, f, ensure_ascii=False, indent=2)
+                        logger.bind(tag=TAG).info(f"迁移完成: facts={len(facts_metadata)}条, commitments={len(commitments_metadata)}条")
+                    except Exception as e:
+                        logger.bind(tag=TAG).warning(f"迁移旧metadata文件失败: {e}")
+                
+                # 从新文件加载
+                facts_metadata = []
+                commitments_metadata = []
+                
+                if os.path.exists(self.facts_metadata_path):
+                    try:
+                        with open(self.facts_metadata_path, 'r', encoding='utf-8') as f:
+                            facts_metadata = json.load(f)
+                            logger.bind(tag=TAG).debug(f"Facts元数据已加载: {len(facts_metadata)} 条")
+                    except Exception as e:
+                        logger.bind(tag=TAG).warning(f"加载facts元数据失败: {e}")
+                
+                if os.path.exists(self.commitments_metadata_path):
+                    try:
+                        with open(self.commitments_metadata_path, 'r', encoding='utf-8') as f:
+                            commitments_metadata = json.load(f)
+                            logger.bind(tag=TAG).debug(f"Commitments元数据已加载: {len(commitments_metadata)} 条")
+                    except Exception as e:
+                        logger.bind(tag=TAG).warning(f"加载commitments元数据失败: {e}")
+                
+                # 合并元数据（按vector_index排序，确保与向量索引顺序一致）
+                # 如果metadata中有vector_index字段，按它排序；否则按加载顺序
+                all_metadata = facts_metadata + commitments_metadata
+                if all_metadata and "vector_index" in all_metadata[0]:
+                    all_metadata.sort(key=lambda x: x.get("vector_index", 999999))
+                self.vector_metadata = all_metadata
+                logger.bind(tag=TAG).debug(f"向量元数据已加载: 总计 {len(self.vector_metadata)} 条 (facts: {len(facts_metadata)}, commitments: {len(commitments_metadata)})")
         except Exception as e:
             logger.bind(tag=TAG).error(f"加载向量索引失败: {e}")
             if FAISS_AVAILABLE:
@@ -594,13 +651,24 @@ class MemoryStorage:
                 extracted_date = date_match.group(1)
                 logger.bind(tag=TAG).debug(f"memory_text中包含事件日期: {extracted_date}，但timestamp使用保存时的日期: {current_date}")
             
-            # 保存元数据
-            self.vector_metadata.append({
+            # 保存元数据（增强版，包含新字段）
+            current_datetime = datetime.now().strftime("%Y-%m-%d")
+            # 获取当前在向量索引中的位置（即metadata的索引）
+            vector_index = len(self.vector_metadata)
+            metadata = {
                 "text": memory_text,
                 "memory_type": memory_type,
                 "user_id": user_id,
-                "timestamp": timestamp
-            })
+                "timestamp": timestamp,
+                # 新增字段
+                "importance": 0.5,  # 默认重要性（0-1），后续可以根据内容计算
+                "status": "active",  # active/dormant/archived/deleted
+                "last_accessed": current_datetime,  # 最后访问时间（创建时就是当前时间）
+                "created_at": current_datetime,  # 创建时间
+                "access_count": 0,  # 访问次数（初始为0）
+                "vector_index": vector_index,  # 在向量索引中的位置，用于确保顺序一致
+            }
+            self.vector_metadata.append(metadata)
             
             total_time = time.time() - start_time
             if total_time > 0.001:
@@ -637,16 +705,43 @@ class MemoryStorage:
             faiss.write_index(self.vector_index, self.vector_index_path)
             index_time = time.time() - index_start
             
-            # 保存元数据文件
+            # 保存元数据文件（分别保存facts和commitments）
             metadata_start = time.time()
-            with open(self.vector_metadata_path, 'w', encoding='utf-8') as f:
-                json.dump(self.vector_metadata, f, ensure_ascii=False, indent=2)
-            metadata_time = time.time() - metadata_start
             
+            # 按类型分开
+            facts_metadata = [m for m in self.vector_metadata if m.get("memory_type") == "facts"]
+            commitments_metadata = [m for m in self.vector_metadata if m.get("memory_type") == "commitments"]
+            
+            # 确保目录存在
+            facts_dir = os.path.dirname(self.facts_metadata_path)
+            commitments_dir = os.path.dirname(self.commitments_metadata_path)
+            if facts_dir:
+                os.makedirs(facts_dir, exist_ok=True)
+            if commitments_dir:
+                os.makedirs(commitments_dir, exist_ok=True)
+            
+            # 保存facts元数据
+            facts_time = 0
+            if facts_metadata:
+                facts_start = time.time()
+                with open(self.facts_metadata_path, 'w', encoding='utf-8') as f:
+                    json.dump(facts_metadata, f, ensure_ascii=False, indent=2)
+                facts_time = time.time() - facts_start
+            
+            # 保存commitments元数据
+            commitments_time = 0
+            if commitments_metadata:
+                commitments_start = time.time()
+                with open(self.commitments_metadata_path, 'w', encoding='utf-8') as f:
+                    json.dump(commitments_metadata, f, ensure_ascii=False, indent=2)
+                commitments_time = time.time() - commitments_start
+            
+            metadata_time = time.time() - metadata_start
             total_time = time.time() - start_time
             logger.bind(tag=TAG).info(f"向量索引保存耗时: {total_time:.3f}s（索引文件: {index_time:.3f}s, 元数据文件: {metadata_time:.3f}s）")
             logger.bind(tag=TAG).info(f"向量索引已保存: {self.vector_index_path} (共 {self.vector_index.ntotal} 条向量)")
-            logger.bind(tag=TAG).info(f"向量元数据已保存: {self.vector_metadata_path} (共 {len(self.vector_metadata)} 条)")
+            logger.bind(tag=TAG).info(f"Facts元数据已保存: {self.facts_metadata_path} (共 {len(facts_metadata)} 条)")
+            logger.bind(tag=TAG).info(f"Commitments元数据已保存: {self.commitments_metadata_path} (共 {len(commitments_metadata)} 条)")
         except Exception as e:
             import traceback
             logger.bind(tag=TAG).error(f"保存向量索引失败: {traceback.format_exc()}")

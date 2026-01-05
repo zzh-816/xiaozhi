@@ -100,11 +100,18 @@ class MemoryRetriever:
             if len(distances[0]) > 0 and np.allclose(distances[0], 0):
                 logger.bind(tag=TAG).warning(f"所有检索结果的距离都为0，这可能是由于：1) 索引中的向量是用旧方法生成的 2) 向量维度不匹配 3) 向量生成失败")
             
+            current_date = datetime.now().strftime("%Y-%m-%d")
             for i, idx in enumerate(indices[0]):
                 if idx < len(vector_metadata):
                     meta = vector_metadata[idx]
                     distance = distances[0][i] if i < len(distances[0]) else None
                     logger.bind(tag=TAG).info(f"检索结果 {i+1}: 类型={meta['memory_type']}, 距离={distance:.4f}, 内容={meta['text'][:50]}")
+                    
+                    # 更新访问统计（如果metadata支持）
+                    if "access_count" in meta:
+                        meta["access_count"] = meta.get("access_count", 0) + 1
+                        meta["last_accessed"] = current_date
+                    
                     if meta["memory_type"] == "facts":
                         result["facts"].append(meta["text"])
                     elif meta["memory_type"] == "commitments":

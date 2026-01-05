@@ -72,6 +72,7 @@ class MemoryProvider(MemoryProviderBase):
         # 数据库和向量索引路径
         db_path = os.path.join(self.data_dir, f"memory_{safe_role_id}.db")
         vector_index_path = os.path.join(self.data_dir, f"vector_index_{safe_role_id}.faiss")
+        # 使用统一的metadata路径（MemoryStorage内部会拆分为两个文件）
         vector_metadata_path = os.path.join(self.data_dir, f"vector_metadata_{safe_role_id}.json")
         
         # 从配置中获取embedding维度（如果配置了embedder）
