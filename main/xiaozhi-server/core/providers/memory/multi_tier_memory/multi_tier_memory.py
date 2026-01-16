@@ -247,6 +247,16 @@ class MemoryProvider(MemoryProviderBase):
                 logger.bind(tag=TAG).info(f"会话关闭：最终提取的记忆已保存，保存耗时: {save_time:.3f}s，总耗时: {finalize_time:.3f}s")
             else:
                 logger.bind(tag=TAG).info(f"会话关闭：最终提取未发现新记忆，总耗时: {finalize_time:.3f}s")
+            
+            # 执行维护任务：更新重要性、遗忘低重要性记忆
+            try:
+                maintenance_start = time.time()
+                await self.manager.maintenance_task()
+                maintenance_time = time.time() - maintenance_start
+                logger.bind(tag=TAG).info(f"会话关闭：维护任务完成，耗时: {maintenance_time:.3f}s")
+            except Exception as e:
+                import traceback
+                logger.bind(tag=TAG).error(f"会话关闭：维护任务失败: {e}, 错误详情: {traceback.format_exc()}")
         except Exception as e:
             import traceback
             logger.bind(tag=TAG).error(f"会话关闭：最终提取失败: {e}, 错误详情: {traceback.format_exc()}")

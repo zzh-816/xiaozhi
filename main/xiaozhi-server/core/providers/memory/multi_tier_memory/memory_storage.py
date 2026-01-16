@@ -27,6 +27,7 @@ except ImportError:
     SENTENCE_TRANSFORMERS_AVAILABLE = False
 
 from ..base import logger
+from .importance_calculator import ImportanceCalculator
 
 TAG = __name__
 
@@ -63,6 +64,7 @@ class MemoryStorage:
         # 向量索引和元数据
         self.vector_index = None
         self.vector_metadata = []
+        self.importance_calculator = ImportanceCalculator()
         
         # 初始化
         self._init_database()
@@ -661,13 +663,15 @@ class MemoryStorage:
                 "user_id": user_id,
                 "timestamp": timestamp,
                 # 新增字段
-                "importance": 0.5,  # 默认重要性（0-1），后续可以根据内容计算
+                "importance": 0.5,  # 初始值，后续会重新计算
                 "status": "active",  # active/dormant/archived/deleted
                 "last_accessed": current_datetime,  # 最后访问时间（创建时就是当前时间）
                 "created_at": current_datetime,  # 创建时间
                 "access_count": 0,  # 访问次数（初始为0）
                 "vector_index": vector_index,  # 在向量索引中的位置，用于确保顺序一致
             }
+            # 计算初始重要性
+            metadata["importance"] = self.importance_calculator.calculate(metadata)
             self.vector_metadata.append(metadata)
             
             total_time = time.time() - start_time
@@ -821,4 +825,87 @@ class MemoryStorage:
     def get_vector_metadata(self):
         """获取向量元数据（供检索层使用）"""
         return self.vector_metadata
+    
+    def update_importance_scores(self) -> int:
+        """
+        批量更新所有active记忆的重要性
+        
+        Returns:
+            更新的条目数量
+        """
+        updated = 0
+        if not self.vector_metadata:
+            return updated
+        
+        for meta in self.vector_metadata:
+            try:
+                if meta.get("status") != "active":
+                    continue
+                new_importance = self.importance_calculator.calculate(meta)
+                meta["importance"] = new_importance
+                updated += 1
+            except Exception as e:
+                logger.bind(tag=TAG).warning(f"更新重要性失败: {meta.get('text', '')[:50]}, 错误: {e}")
+        
+        if updated > 0:
+            logger.bind(tag=TAG).info(f"重要性批量更新完成，更新 {updated} 条")
+        return updated
+    
+    def forget_low_importance_memories(
+        self,
+        importance_threshold: float = 0.2,
+        days_since_access: int = 90,
+        force_forget_threshold: float = 0.1
+    ) -> int:
+        """
+        遗忘低重要性记忆（软删除，标记为archived）
+        
+        Returns:
+            被标记为archived的条目数量
+        """
+        if not self.vector_metadata:
+            return 0
+        
+        now = datetime.now()
+        archived = 0
+        for meta in self.vector_metadata:
+            try:
+                if meta.get("status") != "active":
+                    continue
+                
+                importance = float(meta.get("importance", 0.0))
+                last_accessed = meta.get("last_accessed") or meta.get("created_at")
+                days_since_last = self._days_since(last_accessed, now)
+                
+                # 条件1：重要性低且长时间未访问
+                cond_low_and_old = (
+                    importance < importance_threshold and
+                    days_since_last is not None and
+                    days_since_last >= days_since_access
+                )
+                
+                # 条件2：极低重要性（强制遗忘）
+                cond_force = importance < force_forget_threshold
+                
+                if cond_low_and_old or cond_force:
+                    meta["status"] = "archived"
+                    meta["archived_at"] = now.strftime("%Y-%m-%d")
+                    archived += 1
+            except Exception as e:
+                logger.bind(tag=TAG).warning(f"遗忘判断失败: {meta.get('text', '')[:50]}, 错误: {e}")
+        
+        if archived > 0:
+            logger.bind(tag=TAG).info(f"低重要性记忆已归档 {archived} 条 (threshold={importance_threshold}, days_since_access={days_since_access})")
+        return archived
+    
+    def _days_since(self, date_str: Optional[str], now: Optional[datetime] = None) -> Optional[int]:
+        if not date_str:
+            return None
+        try:
+            if now is None:
+                now = datetime.now()
+            dt = datetime.strptime(date_str, "%Y-%m-%d")
+            return (now - dt).days
+        except Exception:
+            return None
 

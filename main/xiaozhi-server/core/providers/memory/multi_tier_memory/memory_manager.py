@@ -7,6 +7,7 @@ from typing import List, Dict, Optional
 
 from ..base import logger
 from .memory_storage import MemoryStorage
+from .memory_deduplicator import MemoryDeduplicator
 
 TAG = __name__
 
@@ -481,21 +482,25 @@ class MemoryManager:
         if metadata_load_time > 0.001:
             logger.bind(tag=TAG).debug(f"加载向量元数据耗时: {metadata_load_time:.3f}s")
         
+        # 初始化去重器（使用语义相似度，阈值0.87，适合bge-small-zh-v1.5模型）
+        deduplicator = MemoryDeduplicator(
+            storage=self.storage,
+            similarity_threshold=0.87  # bge-small-zh-v1.5模型建议阈值0.87-0.90
+        )
+        
+        # 建立日期索引，加速去重
+        dedup_index_start = time.time()
+        deduplicator.build_index(existing_metadata)
+        dedup_index_time = time.time() - dedup_index_start
+        if dedup_index_time > 0.001:
+            logger.bind(tag=TAG).debug(f"建立去重索引耗时: {dedup_index_time:.3f}s")
+        
+        # 用于记录同一次提取中的完全匹配（避免LLM重复提取）
         existing_texts = set()
-        existing_facts_texts = set()  # 用于跨类型去重
-        existing_commitments_texts = set()  # 用于跨类型去重
-        dedup_start = time.time()
         for meta in existing_metadata:
             text = meta.get("text", "").strip()
-            existing_texts.add(text)
-            memory_type_existing = meta.get("memory_type", "")
-            if memory_type_existing == "facts":
-                existing_facts_texts.add(text)
-            elif memory_type_existing == "commitments":
-                existing_commitments_texts.add(text)
-        dedup_time = time.time() - dedup_start
-        if dedup_time > 0.001:
-            logger.bind(tag=TAG).debug(f"构建去重索引耗时: {dedup_time:.3f}s")
+            if text:
+                existing_texts.add(text)
         
         for memory_type in ["facts", "commitments"]:
             memory_type_start = time.time()
@@ -504,108 +509,33 @@ class MemoryManager:
                 logger.bind(tag=TAG).info(f"没有{memory_type}需要保存（LLM返回空列表）")
                 continue
             
-            # 去重：对于facts和commitments，提取关键信息进行去重
-            seen_keys = set()  # 用于同一次提取中的去重
             dedup_check_time = 0
-            embedding_time = 0
             save_time = 0
+            
             for memory_text in memory_list:
                 if not memory_text or not memory_text.strip():
                     logger.bind(tag=TAG).debug(f"跳过空的{memory_type}条目")
                     continue
                 
-                # 检查是否已存在（完全匹配）
+                # 1. 先检查完全匹配（快速过滤）
                 if memory_text.strip() in existing_texts:
                     logger.bind(tag=TAG).debug(f"跳过重复的{memory_type}（完全匹配）: {memory_text[:50]}")
                     continue
                 
-                # 提取关键信息进行智能去重（避免同一事件的不同表述被重复保存）
-                # 格式可能是："2025-12-20: 用户去爬山" 或 "2025-12-20: 用户今天去爬山了"
-                core_text = memory_text
-                # 移除日期前缀（如果有）
-                date_match = re.match(r'^\d{4}-\d{2}-\d{2}:\s*', core_text)
-                if date_match:
-                    core_text = core_text[date_match.end():]
-                
-                # 提取核心关键词（移除"用户"、"今天"、"了"等常见词）
-                core_text = core_text.replace("用户", "").replace("今天", "").replace("了", "").strip()
-                # 移除多余的标点和空格
-                core_text = re.sub(r'\s+', ' ', core_text).strip()
-                # 提取主要动作和对象（前40个字符作为去重key，足够覆盖大部分情况）
-                key = core_text[:40].strip()
-                
-                # 检查现有数据中是否有相似的（通过比较key）
-                # 1. 先检查同类型数据
+                # 2. 使用去重器检查语义相似度（只比较同一天的记忆）
                 dedup_check_start = time.time()
-                is_duplicate = False
-                same_type_texts = existing_facts_texts if memory_type == "facts" else existing_commitments_texts
-                for existing_text in same_type_texts:
-                    existing_core = existing_text
-                    # 移除日期前缀
-                    existing_date_match = re.match(r'^\d{4}-\d{2}-\d{2}:\s*', existing_core)
-                    if existing_date_match:
-                        existing_core = existing_core[existing_date_match.end():]
-                    # 提取核心关键词
-                    existing_core = existing_core.replace("用户", "").replace("今天", "").replace("了", "").replace("将", "").replace("要", "").strip()
-                    existing_core = re.sub(r'\s+', ' ', existing_core).strip()
-                    existing_key = existing_core[:40].strip()
-                    
-                    # 如果key相似（包含关系或高度重叠），认为是重复
-                    if key and existing_key:
-                        # 检查是否包含关系（一个包含另一个的核心部分）
-                        if key in existing_key or existing_key in key:
-                            is_duplicate = True
-                            logger.bind(tag=TAG).debug(f"跳过重复的{memory_type}（语义相似）: {memory_text[:50]} (与 {existing_text[:50]} 相似)")
-                            break
-                        # 检查重叠度（如果前20个字符相同，认为是重复）
-                        min_len = min(len(key), len(existing_key))
-                        if min_len >= 10:  # 至少10个字符才比较
-                            overlap = sum(1 for i in range(min_len) if key[i] == existing_key[i])
-                            if overlap >= min_len * 0.7:  # 70%重叠认为是重复
-                                is_duplicate = True
-                                logger.bind(tag=TAG).debug(f"跳过重复的{memory_type}（高度重叠）: {memory_text[:50]} (与 {existing_text[:50]} 相似)")
-                                break
-                
-                # 2. 检查跨类型去重（避免同一事件被提取为不同类型）
-                if not is_duplicate:
-                    other_type_texts = existing_commitments_texts if memory_type == "facts" else existing_facts_texts
-                    for existing_text in other_type_texts:
-                        existing_core = existing_text
-                        # 移除日期前缀
-                        existing_date_match = re.match(r'^\d{4}-\d{2}-\d{2}:\s*', existing_core)
-                        if existing_date_match:
-                            existing_core = existing_core[existing_date_match.end():]
-                        # 提取核心关键词（移除"用户"、"今天"、"了"、"将"、"要"等）
-                        existing_core = existing_core.replace("用户", "").replace("今天", "").replace("了", "").replace("将", "").replace("要", "").replace("计划", "").strip()
-                        existing_core = re.sub(r'\s+', ' ', existing_core).strip()
-                        existing_key = existing_core[:40].strip()
-                        
-                        # 如果key相似，认为是同一事件，跳过保存
-                        if key and existing_key:
-                            # 检查是否包含关系（一个包含另一个的核心部分）
-                            if key in existing_key or existing_key in key:
-                                is_duplicate = True
-                                logger.bind(tag=TAG).warning(f"跳过重复的{memory_type}（跨类型重复）: {memory_text[:50]} (与 {existing_text[:50]} 相似，已在另一种类型中保存)")
-                                break
-                            # 检查重叠度
-                            min_len = min(len(key), len(existing_key))
-                            if min_len >= 10:
-                                overlap = sum(1 for i in range(min_len) if key[i] == existing_key[i])
-                                if overlap >= min_len * 0.7:
-                                    is_duplicate = True
-                                    logger.bind(tag=TAG).warning(f"跳过重复的{memory_type}（跨类型重复）: {memory_text[:50]} (与 {existing_text[:50]} 相似，已在另一种类型中保存)")
-                                    break
-                
-                if is_duplicate:
-                    continue
-                
+                is_dup, matched_memory, similarity = deduplicator.is_duplicate(
+                    memory_text, 
+                    memory_type=memory_type
+                )
                 dedup_check_time += time.time() - dedup_check_start
                 
-                # 检查同一次提取中是否重复
-                if key in seen_keys:
-                    logger.bind(tag=TAG).debug(f"跳过重复的{memory_type}（同次提取）: {key}")
+                if is_dup:
+                    logger.bind(tag=TAG).info(
+                        f"跳过重复的{memory_type}（语义相似，同一天事件日期）: {memory_text[:50]} "
+                        f"(与 {matched_memory.get('text', '')[:50] if matched_memory else ''} 相似，相似度: {similarity:.4f})"
+                    )
                     continue
-                seen_keys.add(key)
                 
                 # 替换LLM返回的占位符（如果LLM直接返回了{{current_date}}）
                 memory_text_processed = memory_text.replace("{{current_date}}", current_date).replace("{current_date}", current_date)
@@ -624,6 +554,28 @@ class MemoryManager:
                 if was_processed:
                     memory_text_processed = corrected_text
                     logger.bind(tag=TAG).info(f"{memory_type}日期已验证并处理: {memory_text[:50]} → {corrected_text[:50]}")
+                
+                # 【新增】验证日期合理性：检查日期是否符合记忆类型
+                date_validation_result = self._validate_memory_date(memory_text_processed, memory_type, current_date)
+                if date_validation_result is None:
+                    # 日期验证失败，拒绝保存
+                    logger.bind(tag=TAG).warning(f"日期验证失败，拒绝保存{memory_type}: {memory_text_processed[:50]}")
+                    continue
+                elif date_validation_result != memory_type:
+                    # 需要转换类型
+                    logger.bind(tag=TAG).info(f"记忆类型已转换: {memory_type} → {date_validation_result}, 原因: 日期不符合类型要求")
+                    memory_type = date_validation_result
+                    # 重新检查去重（使用新的类型）
+                    is_dup, matched_memory, similarity = deduplicator.is_duplicate(
+                        memory_text_processed, 
+                        memory_type=memory_type
+                    )
+                    if is_dup:
+                        logger.bind(tag=TAG).info(
+                            f"跳过重复的{memory_type}（转换后去重检查）: {memory_text_processed[:50]} "
+                            f"(与 {matched_memory.get('text', '')[:50] if matched_memory else ''} 相似，相似度: {similarity:.4f})"
+                        )
+                        continue
                 
                 save_item_start = time.time()
                 if self.storage.save_vector_memory(memory_text_processed, memory_type, user_id, current_date):
@@ -654,4 +606,115 @@ class MemoryManager:
         vector_save_time = time.time() - vector_save_start
         total_time = time.time() - total_start
         logger.bind(tag=TAG).info(f"向量索引保存耗时: {index_save_time:.3f}s，向量记忆保存总耗时: {vector_save_time:.3f}s，记忆保存总耗时: {total_time:.3f}s")
+    
+    def _validate_memory_date(self, memory_text: str, memory_type: str, current_date: str) -> Optional[str]:
+        """
+        验证记忆的日期是否符合类型要求
+        
+        规则：
+        - facts：日期必须是 <= 当前日期的（已发生的）
+        - commitments：日期必须是 > 当前日期的（未来的）
+        
+        Args:
+            memory_text: 记忆文本，格式如 "2026-01-18: 用户要去商场"
+            memory_type: 当前记忆类型（'facts' 或 'commitments'）
+            current_date: 当前日期（YYYY-MM-DD格式）
+        
+        Returns:
+            - 如果日期合理：返回正确的memory_type（可能与输入相同，也可能需要转换）
+            - 如果日期不合理且无法转换：返回None（拒绝保存）
+        """
+        try:
+            # 提取日期
+            date_match = re.match(r'^(\d{4}-\d{2}-\d{2}):\s*(.+)', memory_text)
+            if not date_match:
+                # 没有日期前缀，无法验证，允许保存
+                return memory_type
+            
+            event_date_str = date_match.group(1)
+            content = date_match.group(2)
+            
+            # 解析日期
+            event_date = datetime.strptime(event_date_str, "%Y-%m-%d")
+            current_date_obj = datetime.strptime(current_date, "%Y-%m-%d")
+            
+            # 判断日期是过去还是未来
+            is_past = event_date < current_date_obj
+            is_today = event_date.date() == current_date_obj.date()
+            is_future = event_date > current_date_obj
+            
+            # 验证逻辑
+            if memory_type == "facts":
+                # Facts必须是已发生的事件
+                if is_future:
+                    # 日期在未来，说明这是未来的计划，应该转换为commitments
+                    # 不管内容有没有未来词汇，日期在未来就说明不是已发生的事实
+                    logger.bind(tag=TAG).warning(
+                        f"Facts日期在未来，转换为commitments: {memory_text[:50]} "
+                        f"(日期: {event_date_str}, 当前: {current_date})"
+                    )
+                    return "commitments"
+                else:
+                    # 日期是过去或今天，符合facts要求
+                    return "facts"
+            
+            elif memory_type == "commitments":
+                # Commitments必须是未来的计划
+                if is_past or is_today:
+                    # 日期是过去或今天，应该转换为facts
+                    logger.bind(tag=TAG).info(
+                        f"Commitment日期已过期，转换为facts: {memory_text[:50]} "
+                        f"(日期: {event_date_str}, 当前: {current_date})"
+                    )
+                    return "facts"
+                else:
+                    # 日期在未来，符合commitments要求
+                    return "commitments"
+            
+            return memory_type
+            
+        except (ValueError, AttributeError) as e:
+            logger.bind(tag=TAG).warning(f"日期验证失败: {memory_text[:50]}, 错误: {e}")
+            # 验证失败时，允许保存（保守策略）
+            return memory_type
+    
+    async def maintenance_task(self):
+        """
+        定期维护任务：更新重要性分数、遗忘低重要性记忆
+        
+        应该在会话结束时或定时调用
+        """
+        maintenance_start = time.time()
+        logger.bind(tag=TAG).info("开始执行记忆维护任务")
+        
+        try:
+            # 1. 更新重要性分数
+            importance_start = time.time()
+            updated_count = self.storage.update_importance_scores()
+            importance_time = time.time() - importance_start
+            logger.bind(tag=TAG).info(f"重要性更新完成: {updated_count} 条，耗时: {importance_time:.3f}s")
+            
+            # 2. 遗忘低重要性记忆
+            forget_start = time.time()
+            archived_count = self.storage.forget_low_importance_memories(
+                importance_threshold=0.2,  # 重要性低于0.2
+                days_since_access=90,      # 且90天未访问
+                force_forget_threshold=0.1  # 或重要性低于0.1（强制遗忘）
+            )
+            forget_time = time.time() - forget_start
+            logger.bind(tag=TAG).info(f"记忆遗忘完成: {archived_count} 条已归档，耗时: {forget_time:.3f}s")
+            
+            # 3. 保存更新后的元数据
+            if updated_count > 0 or archived_count > 0:
+                save_start = time.time()
+                self.storage.save_vector_index()  # 保存时会保存元数据
+                save_time = time.time() - save_start
+                logger.bind(tag=TAG).info(f"维护后的元数据已保存，耗时: {save_time:.3f}s")
+            
+            total_time = time.time() - maintenance_start
+            logger.bind(tag=TAG).info(f"记忆维护任务完成，总耗时: {total_time:.3f}s")
+            
+        except Exception as e:
+            import traceback
+            logger.bind(tag=TAG).error(f"记忆维护任务失败: {e}, 错误详情: {traceback.format_exc()}")
 

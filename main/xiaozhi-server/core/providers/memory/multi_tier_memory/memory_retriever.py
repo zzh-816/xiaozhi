@@ -104,6 +104,12 @@ class MemoryRetriever:
             for i, idx in enumerate(indices[0]):
                 if idx < len(vector_metadata):
                     meta = vector_metadata[idx]
+                    
+                    # 过滤archived记忆（只返回active记忆）
+                    if meta.get("status") != "active":
+                        logger.bind(tag=TAG).debug(f"跳过archived记忆: {meta['text'][:50]}")
+                        continue
+                    
                     distance = distances[0][i] if i < len(distances[0]) else None
                     logger.bind(tag=TAG).info(f"检索结果 {i+1}: 类型={meta['memory_type']}, 距离={distance:.4f}, 内容={meta['text'][:50]}")
                     
